@@ -63,7 +63,7 @@ app.post("/api/ai/extract", (req, res) => {
 
   // quantity: first integer >0
   const qtyMatch = text.match(/(\d+)\b/);
-  const quantity = qtyMatch ? parseInt(qtyMatch[1], 10) : undefined;
+  const quantity = qtyMatch && qtyMatch[1] ? parseInt(qtyMatch[1], 10) : undefined;
 
   // budget: look for $number or number preceded by budget
   const budgetMatch = text.match(/\$\s*(\d+(?:\.\d+)?)/) || text.match(/budget[^0-9]*(\d+(?:\.\d+)?)/i);
@@ -76,7 +76,8 @@ app.post("/api/ai/extract", (req, res) => {
   // product: pick a noun-like token from subject (first word after inquiry words)
   let product: string | undefined;
   const prodMatch = msg.subject.match(/(?:about|need|for|of)\s+([A-Za-z0-9 \-]+)/i);
-  if (prodMatch) product = prodMatch[1].split(/[\.|,|\n]/)[0].trim();
+  const prodCapture = prodMatch?.[1];
+  if (prodCapture) product = prodCapture.split(/[\.|,|\n]/)[0]!.trim();
   if (!product) {
     const parts = msg.subject.split(/[:\-–]/).pop()?.trim();
     if (parts) product = parts.split(" ").slice(0, 3).join(" ");
@@ -111,6 +112,7 @@ app.post("/api/leads", async (req, res) => {
   try {
     const lead = await prisma.lead.create({
       data: {
+        id: crypto.randomUUID(),
         sourceMessageId,
         product,
         quantity,
@@ -121,8 +123,8 @@ app.post("/api/leads", async (req, res) => {
     });
     res.json(lead);
   } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: "Could not create lead" });
+    console.error("LEAD CREATION ERROR:", err);
+    res.status(500).json({ error: err?.message ?? "Could not create lead", details: String(err) });
   }
 });
 
