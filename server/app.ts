@@ -1,6 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import { extractForMessage, extractRequestSchema } from "./ai.js";
 import { prisma } from "./db.js";
 
@@ -70,6 +71,58 @@ app.get("/api/leads", async (_request, response, next) => {
   }
 });
 
+app.post("/api/leads", async (request, response, next) => {
+  try {
+    const { sourceMessageId, product, quantity, material, budget } = request.body;
+
+    // Validation
+    if (!sourceMessageId || typeof sourceMessageId !== "string") {
+      response.status(400).json({ error: "sourceMessageId is required" });
+      return;
+    }
+    if (!product || typeof product !== "string" || product.trim().length === 0) {
+      response.status(400).json({ error: "product is required" });
+      return;
+    }
+    if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity <= 0) {
+      response.status(400).json({ error: "quantity must be a positive integer" });
+      return;
+    }
+    if (material !== undefined && material !== null && typeof material !== "string") {
+      response.status(400).json({ error: "material must be a string or null" });
+      return;
+    }
+    if (budget !== undefined && budget !== null && (typeof budget !== "number" || !Number.isFinite(budget) || budget < 0)) {
+      response.status(400).json({ error: "budget must be a non-negative number" });
+      return;
+    }
+
+    // Verify message exists
+    const message = await prisma.message.findUnique({ where: { id: sourceMessageId } });
+    if (!message) {
+      response.status(400).json({ error: "sourceMessageId does not exist" });
+      return;
+    }
+
+    // Create lead
+    const lead = await prisma.lead.create({
+      data: {
+        id: randomUUID(),
+        sourceMessageId,
+        product: product.trim(),
+        quantity,
+        material: material === "" ? null : material === undefined ? null : material,
+        budget: budget === undefined ? null : budget,
+        status: "NEW",
+      },
+    });
+
+    response.json({ ...lead, createdAt: lead.createdAt.toISOString() });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/ai/extract", async (request, response, next) => {
   try {
     const parsed = extractRequestSchema.safeParse(request.body);
@@ -95,6 +148,42 @@ app.post("/api/ai/extract", async (request, response, next) => {
       return;
     }
     response.json(extraction);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/leads/:leadId/status", async (request, response, next) => {
+  try {
+    const { leadId } = request.params;
+    const { status } = request.body;
+
+    // Validate status
+    if (status !== "CONTACTED") {
+      response.status(400).json({ error: "Only { status: 'CONTACTED' } is allowed" });
+      return;
+    }
+
+    // Find lead
+    const lead = await prisma.lead.findUnique({ where: { id: leadId } });
+    if (!lead) {
+      response.status(404).json({ error: "Lead not found" });
+      return;
+    }
+
+    // Can only change from NEW to CONTACTED
+    if (lead.status !== "NEW") {
+      response.status(400).json({ error: "Can only change status from NEW to CONTACTED" });
+      return;
+    }
+
+    // Update status
+    const updated = await prisma.lead.update({
+      where: { id: leadId },
+      data: { status: "CONTACTED" },
+    });
+
+    response.json({ ...updated, createdAt: updated.createdAt.toISOString() });
   } catch (error) {
     next(error);
   }

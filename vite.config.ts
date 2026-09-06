@@ -9,5 +9,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: { "/api": `http://localhost:${apiPort}` },
+    watch: {
+      ignored: ["**/.vs/**", "**/src/.vs/**"],
+    },
   },
 });
