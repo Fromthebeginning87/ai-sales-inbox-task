@@ -74,6 +74,18 @@ function DetailPage({ messageId }: { messageId: string }) {
   const [message, setMessage] = useState<Message | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
 
+  // form state
+  const [product, setProduct] = useState("");
+  const [quantity, setQuantity] = useState<string>("");
+  const [material, setMaterial] = useState<string>("");
+  const [budget, setBudget] = useState<string>("");
+
+  const [touched, setTouched] = useState({ product: false, quantity: false, material: false, budget: false });
+
+  const [extracting, setExtracting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   useEffect(() => {
     let active = true;
     api.getMessage(messageId).then((result) => {
@@ -84,6 +96,45 @@ function DetailPage({ messageId }: { messageId: string }) {
 
   if (state === "loading") return <main className="page-container"><StateMessage>Loading message…</StateMessage></main>;
   if (state === "error" || !message) return <main className="page-container"><StateMessage>Message not found.</StateMessage></main>;
+
+  async function handleExtract() {
+    setError(null);
+    setExtracting(true);
+    try {
+      const extracted = await api.aiExtract(messageId);
+      // Merge: only fill empty fields that were not touched by user
+      if (!touched.product && (!product || product.trim() === "") && typeof extracted.product === "string") setProduct(String(extracted.product));
+      if (!touched.quantity && (!quantity || quantity.trim() === "") && typeof extracted.quantity === "number") setQuantity(String(extracted.quantity));
+      if (!touched.material && (!material || material.trim() === "") && (typeof extracted.material === "string" || extracted.material === null)) setMaterial(extracted.material === null ? "" : String(extracted.material));
+      if (!touched.budget && (!budget || budget.trim() === "") && typeof extracted.budget === "number") setBudget(String(extracted.budget));
+    } catch (err) {
+      setError("AI extraction failed. You can still fill the form manually.");
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+  async function handleSave(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    setError(null);
+    setSaving(true);
+    try {
+      const payload = {
+        sourceMessageId: messageId,
+        product,
+        quantity: Number(quantity),
+        material: material === "" ? undefined : material,
+        budget: budget === "" ? undefined : Number(budget),
+      } as const;
+      await api.createLead(payload as any);
+      // navigate to pipeline after save
+      window.location.href = "/pipeline";
+    } catch (err) {
+      setError("Could not save lead. Check the form and try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <main className="page-container detail-layout">
@@ -98,9 +149,33 @@ function DetailPage({ messageId }: { messageId: string }) {
           </dl>
           <div className="message-body">{message.body}</div>
         </article>
-        <aside className="panel placeholder-panel" aria-label="Lead extraction status">
-          <p className="eyebrow">Next step</p>
-          <p className="placeholder" role="status">Lead extraction not implemented yet.</p>
+        <aside className="panel" aria-label="Lead extraction">
+          <p className="eyebrow">Lead extraction</p>
+          <form onSubmit={handleSave}>
+            <div className="form-row">
+              <label htmlFor="product">Product</label>
+              <input id="product" value={product} onChange={(e) => { setProduct(e.target.value); setTouched((t) => ({ ...t, product: true })); }} />
+            </div>
+            <div className="form-row">
+              <label htmlFor="quantity">Quantity</label>
+              <input id="quantity" value={quantity} onChange={(e) => { setQuantity(e.target.value); setTouched((t) => ({ ...t, quantity: true })); }} inputMode="numeric" />
+            </div>
+            <div className="form-row">
+              <label htmlFor="material">Material</label>
+              <input id="material" value={material} onChange={(e) => { setMaterial(e.target.value); setTouched((t) => ({ ...t, material: true })); }} />
+            </div>
+            <div className="form-row">
+              <label htmlFor="budget">Budget</label>
+              <input id="budget" value={budget} onChange={(e) => { setBudget(e.target.value); setTouched((t) => ({ ...t, budget: true })); }} inputMode="decimal" />
+            </div>
+
+            {error && <div role="alert" className="error">{error}</div>}
+
+            <div className="form-actions">
+              <button type="button" onClick={handleExtract} disabled={extracting || saving}>Extract with AI</button>
+              <button type="submit" disabled={saving || extracting}>{saving ? "Saving…" : "Save lead"}</button>
+            </div>
+          </form>
         </aside>
       </section>
     </main>
@@ -110,6 +185,8 @@ function DetailPage({ messageId }: { messageId: string }) {
 function PipelinePage() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -119,6 +196,19 @@ function PipelinePage() {
     return () => { active = false; };
   }, []);
 
+  async function markContacted(leadId: string) {
+    setError(null);
+    setLoadingMap((m) => ({ ...m, [leadId]: true }));
+    try {
+      const updated = await api.patchLeadStatus(leadId, "CONTACTED");
+      setLeads((prev) => prev.map((l) => l.id === updated.id ? updated : l));
+    } catch (err) {
+      setError("Could not update status.");
+    } finally {
+      setLoadingMap((m) => ({ ...m, [leadId]: false }));
+    }
+  }
+
   return (
     <main className="page-container">
       <section className="page-heading"><div><p className="eyebrow">Revenue view</p><h1>Pipeline</h1><p className="muted">Saved leads will appear here.</p></div><div className="metric-card"><strong>{leads.length}</strong><span>leads</span></div></section>
@@ -126,14 +216,24 @@ function PipelinePage() {
         <div className="panel-heading"><h2 id="pipeline-heading">Leads</h2></div>
         {state === "loading" && <StateMessage>Loading pipeline…</StateMessage>}
         {state === "error" && <StateMessage>Could not load the pipeline.</StateMessage>}
-        {state === "ready" && (leads.length === 0 ? <p className="state-message">No leads yet.</p> : <ul className="lead-list">{leads.map((lead) => <LeadCard key={lead.id} lead={lead} />)}</ul>)}
+        {state === "ready" && (leads.length === 0 ? <p className="state-message">No leads yet.</p> : <ul className="lead-list">{leads.map((lead) => <LeadCard key={lead.id} lead={lead} loading={!!loadingMap[lead.id]} onMarkContacted={() => markContacted(lead.id)} />)}</ul>)}
+        {error && <div role="alert" className="error">{error}</div>}
       </section>
     </main>
   );
 }
 
-function LeadCard({ lead }: { lead: Lead }) {
-  return <li className="lead-card"><div><h3>{lead.product}</h3><p>{lead.quantity} unit{lead.quantity === 1 ? "" : "s"}{lead.material ? ` · ${lead.material}` : ""}</p><span className="muted">{lead.status} · {lead.budget === null ? "Budget unknown" : `${lead.budget}`}</span></div></li>;
+function LeadCard({ lead, loading, onMarkContacted }: { lead: Lead; loading?: boolean; onMarkContacted?: () => void }) {
+  return (
+    <li className="lead-card">
+      <div>
+        <h3>{lead.product}</h3>
+        <p>{lead.quantity} unit{lead.quantity === 1 ? "" : "s"}{lead.material ? ` · ${lead.material}` : ""}</p>
+        <span className="muted">{lead.status} · {lead.budget === null ? "Budget unknown" : `${lead.budget}`}</span>
+      </div>
+      {lead.status === "NEW" && onMarkContacted && <div className="card-actions"><button disabled={loading} onClick={onMarkContacted}>{loading ? "…" : "Mark as contacted"}</button></div>}
+    </li>
+  );
 }
 
 export function App() {
